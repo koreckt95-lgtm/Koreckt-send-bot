@@ -9,6 +9,8 @@ import random
 from datetime import datetime, timedelta
 import json
 import re
+import os
+from flask import Flask  # ДОБАВЛЕНО ДЛЯ RENDER
 
 # ==================== НАСТРОЙКИ (ВСТАВЬТЕ СВОИ ДАННЫЕ) ====================
 # ===== ДАННЫЕ БЕРУТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ (БЕЗОПАСНО!) =====
@@ -18,6 +20,22 @@ API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH")
 TARGET_CHATS = os.environ.get("TARGET_CHATS", "").split(",")
 # =========================================================================
+
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER (ДОБАВЛЕНО, НЕ МЕНЯЕТ ЛОГИКУ) =====
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Бот Koreckt работает 24/7!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_web():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+# ================================================================
 
 # Конфигурация для Pydroid3 (хранение в памяти)
 CONFIG = {
@@ -483,8 +501,13 @@ def set_round_cmd(msg):
 # Запуск
 if __name__ == "__main__":
     print("=" * 50)
-    print("🔥 KORECKT ULTIMATE V2.0 ДЛЯ PYDROID3")
+    print("🔥 KORECKT ULTIMATE V2.0 ДЛЯ RENDER")
     print("=" * 50)
+    
+    # Запуск веб-сервера для Render (ДОБАВЛЕНО)
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+    print("🌐 Веб-сервер запущен на порту 5000")
     
     # Запуск движка в отдельном потоке
     mailing_thread = threading.Thread(target=pro_sender_engine, daemon=True)
