@@ -10,6 +10,7 @@ import json
 import re
 import os
 from flask import Flask, request
+import sqlite3  # Добавляем SQLite вместо JSON
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
@@ -48,60 +49,111 @@ def index():
 def health():
     return "OK", 200
 
-class SimpleDB:
-    def __init__(self, filename="koreckt_data.json"):
+# Используем SQLite вместо JSON (решает проблему "database is locked")
+class Database:
+    def __init__(self, filename="koreckt.db"):
         self.filename = filename
-        self.data = self.load()
+        self.lock = threading.Lock()
+        self.init_db()
     
-    def load(self):
-        try:
-            with open(self.filename, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {"ads": [], "history": [], "statistics": {"total": 0, "errors": 0}}
-    
-    def save(self):
-        with open(self.filename, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=2)
+    def init_db(self):
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT,
+                    created TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ad_id INTEGER,
+                    chat TEXT,
+                    success INTEGER,
+                    time TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stats (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER
+                )
+            ''')
+            conn.commit()
+            conn.close()
     
     def add_ad(self, text):
-        ad_id = len(self.data["ads"]) + 1
-        self.data["ads"].append({"id": ad_id, "text": text, "created": datetime.now().isoformat()})
-        self.save()
-        return ad_id
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO ads (text, created) VALUES (?, ?)", 
+                          (text, datetime.now().isoformat()))
+            conn.commit()
+            ad_id = cursor.lastrowid
+            conn.close()
+            return ad_id
     
     def get_ads(self):
-        return self.data["ads"]
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, text, created FROM ads ORDER BY id")
+            rows = cursor.fetchall()
+            conn.close()
+            return [{"id": row[0], "text": row[1], "created": row[2]} for row in rows]
     
     def get_ad_by_id(self, ad_id):
-        for ad in self.data["ads"]:
-            if ad["id"] == ad_id:
-                return ad
-        return None
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, text, created FROM ads WHERE id = ?", (ad_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return {"id": row[0], "text": row[1], "created": row[2]}
+            return None
     
     def delete_ad(self, ad_id):
-        self.data["ads"] = [ad for ad in self.data["ads"] if ad["id"] != ad_id]
-        self.save()
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM ads WHERE id = ?", (ad_id,))
+            conn.commit()
+            conn.close()
     
     def clear_all(self):
-        self.data["ads"] = []
-        self.save()
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM ads")
+            conn.commit()
+            conn.close()
     
     def add_history(self, ad_id, chat, success):
-        self.data["history"].append({
-            "ad_id": ad_id,
-            "chat": chat,
-            "success": success,
-            "time": datetime.now().isoformat()
-        })
-        if len(self.data["history"]) > 1000:
-            self.data["history"] = self.data["history"][-1000:]
-        self.save()
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO history (ad_id, chat, success, time) VALUES (?, ?, ?, ?)",
+                          (ad_id, chat, 1 if success else 0, datetime.now().isoformat()))
+            conn.commit()
+            conn.close()
+    
+    def get_history(self, limit=1000):
+        with self.lock:
+            conn = sqlite3.connect(self.filename, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute("SELECT ad_id, chat, success, time FROM history ORDER BY id DESC LIMIT ?", (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [{"ad_id": row[0], "chat": row[1], "success": bool(row[2]), "time": row[3]} for row in rows]
     
     def get_stats(self):
-        return self.data["statistics"]
+        return {"total": 0, "errors": 0}  # Заглушка
 
-db = SimpleDB()
+db = Database()
 
 def update_stats(sent=True):
     today = datetime.now().date().isoformat()
@@ -273,7 +325,6 @@ def logout_cmd(message):
             pass
         client = None
     bot.reply_to(message, "Logged out successfully")
-
 @bot.message_handler(commands=['cancel'])
 def cancel_auth_cmd(message):
     if message.from_user.id != ADMIN_ID:
@@ -434,6 +485,7 @@ def del_ad_cmd(msg):
             bot.reply_to(msg, f"Ad #{ad_id} not found")
     except:
         bot.reply_to(msg, "Usage: /del 1")
+
 @bot.message_handler(commands=['clear'])
 def clear_cmd(msg):
     if msg.from_user.id != ADMIN_ID: return
@@ -444,7 +496,7 @@ def clear_cmd(msg):
 def stats_cmd(msg):
     if msg.from_user.id != ADMIN_ID: return
     ads = db.get_ads()
-    history = db.data["history"]
+    history = db.get_history()
     success_count = sum(1 for h in history if h["success"])
     response = f"""
 STATISTICS
@@ -463,7 +515,7 @@ Sent: {CONFIG['stats']['total_sent']}
 
 Last 5:
 """
-    last_5 = history[-5:][::-1] if history else []
+    last_5 = history[:5] if history else []
     for h in last_5:
         status = "OK" if h["success"] else "FAIL"
         time_str = h["time"][:19].replace("T", " ")
