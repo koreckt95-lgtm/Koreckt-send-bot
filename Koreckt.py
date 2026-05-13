@@ -9,7 +9,7 @@ import random
 from datetime import datetime, timedelta
 import json
 import re
-import os
+import os  # Добавлен импорт os
 
 # ==================== НАСТРОЙКИ (ВСТАВЬТЕ СВОИ ДАННЫЕ) ====================
 # ===== ДАННЫЕ БЕРУТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ (БЕЗОПАСНО!) =====
@@ -29,9 +29,9 @@ CONFIG = {
         "errors": 0,
         "last_date": datetime.now().date().isoformat()
     },
-    "delay_between_chats": {"min": 150, "max": 400"},
-    "delay_between_rounds": {"min": 300, "max": 600},
-    "typing_speed": {"min": 5, "max": 12},
+    "delay_between_chats": {"min": 150, "max": 400},  # секунды
+    "delay_between_rounds": {"min": 300, "max": 600},  # секунды
+    "typing_speed": {"min": 5, "max": 12},  # символов в секунду
     "anti_flood": True,
     "smart_delays": True
 }
@@ -40,16 +40,10 @@ bot = telebot.TeleBot(BOT_TOKEN)
 client = None
 mailing_thread = None
 
-# Данные для авторизации
-auth_data = {
-    "phone": None,
-    "code": None,
-    "password": None,
-    "step": None,
-    "client": None
-}
+# Данные для авторизации через бота
+auth_sessions = {}  # {chat_id: {"step": "phone", "temp_client": None, "phone": None}}
 
-# Эмуляция базы данных через JSON
+# Эмуляция базы данных через JSON (чтобы не зависеть от SQLite)
 class SimpleDB:
     def __init__(self, filename="koreckt_data.json"):
         self.filename = filename
@@ -96,7 +90,7 @@ class SimpleDB:
             "success": success,
             "time": datetime.now().isoformat()
         })
-        if len(self.data["history"]) > 1000:
+        if len(self.data["history"]) > 1000:  # Храним последние 1000 записей
             self.data["history"] = self.data["history"][-1000:]
         self.save()
     
@@ -118,6 +112,7 @@ def update_stats(sent=True):
         CONFIG["stats"]["errors"] += 1
 
 def smart_delay(min_sec, max_sec, reason=""):
+    """Умная задержка с прогрессом"""
     delay = random.uniform(min_sec, max_sec)
     if reason:
         print(f"⏳ {reason}: {delay:.1f} сек")
@@ -132,25 +127,33 @@ def smart_delay(min_sec, max_sec, reason=""):
         time.sleep(1)
 
 def calculate_typing_time(text):
+    """Продвинутый расчет времени печати"""
+    # Базовая скорость
     speed = random.uniform(CONFIG["typing_speed"]["min"], CONFIG["typing_speed"]["max"])
     base_time = len(text) / speed
     
+    # Паузы на знаки препинания
     punctuation = text.count('.') * 0.25 + text.count(',') * 0.15 + text.count('!') * 0.2 + text.count('?') * 0.2
-    punctuation += text.count('\n') * 0.5
+    punctuation += text.count('\n') * 0.5  # Новая строка
     
+    # Сложные слова (капс, длинные слова)
     words = text.split()
     long_words = sum(1 for w in words if len(w) > 8)
     long_words_bonus = long_words * 0.3
     
+    # Человеческий фактор (ошибки, раздумья)
     human_factor = random.uniform(0.85, 1.4)
     
     total = (base_time + punctuation + long_words_bonus) * human_factor
     
+    # Лимиты
     return min(max(total, 2), 20)
 
 def format_message_with_emoji(text):
+    """Автоматическое добавление эмодзи для натуральности"""
     emojis = ["🔥", "💎", "⭐", "✅", "🚀", "💪", "🎯", "📢", "💡", "✨"]
     
+    # С вероятностью 30% добавляем эмодзи в начало
     if random.random() < 0.3 and not any(e in text[:2] for e in emojis):
         emoji = random.choice(emojis)
         text = f"{emoji} {text}"
@@ -158,26 +161,22 @@ def format_message_with_emoji(text):
     return text
 
 def pro_sender_engine():
+    """Мощный движок рассылки"""
     global client
     
     print("🚀 KORECKT ENGINE V2.0 ЗАПУЩЕН")
     print("=" * 40)
     
-    if client is None:
-        print("⚠️ Клиент не авторизован. Ожидание входа...")
-        while client is None and CONFIG["mailing_enabled"]:
-            time.sleep(5)
-        if client is None:
-            print("❌ Авторизация не выполнена. Движок остановлен.")
-            return
+    # Ждем авторизации через бота
+    while client is None:
+        print("⏳ Ожидание авторизации через бота...")
+        time.sleep(5)
     
+    print("✅ Юзербот успешно авторизован")
     try:
-        me = client.get_me()
-        print(f"✅ Юзербот успешно авторизован")
-        print(f"👤 Аккаунт: {me.first_name}")
-    except Exception as e:
-        print(f"❌ Ошибка авторизации: {e}")
-        return
+        print(f"👤 Аккаунт: {client.get_me().first_name}")
+    except:
+        print("⚠️ Не удалось получить информацию об аккаунте")
     
     print("=" * 40)
     
@@ -187,7 +186,7 @@ def pro_sender_engine():
             continue
         
         if client is None:
-            print("⚠️ Клиент потерян. Ожидание переподключения...")
+            print("⚠️ Клиент потерян, ожидание переподключения...")
             time.sleep(10)
             continue
         
@@ -197,9 +196,11 @@ def pro_sender_engine():
             time.sleep(30)
             continue
         
+        # Выбираем случайное объявление
         ad = random.choice(ads)
         ad_text = ad["text"]
         
+        # Автоформатирование
         if CONFIG["smart_delays"]:
             ad_text = format_message_with_emoji(ad_text)
         
@@ -215,9 +216,11 @@ def pro_sender_engine():
             
             print(f"\n🎯 Обработка чата: {chat}")
             
+            # Имитация входа в чат
             smart_delay(3, 8, "Имитация входа в чат")
             
             try:
+                # Эмуляция набора текста
                 print(f"✍️ Эмулируем набор текста...")
                 typing_time = calculate_typing_time(ad_text)
                 client(functions.messages.SetTypingRequest(
@@ -225,6 +228,7 @@ def pro_sender_engine():
                     action=types.SendMessageTypingAction()
                 ))
                 
+                # Постепенная имитация печати (для реализма)
                 if CONFIG["smart_delays"] and len(ad_text) > 100:
                     parts = len(ad_text) // 50
                     for i in range(parts):
@@ -237,12 +241,15 @@ def pro_sender_engine():
                 else:
                     time.sleep(typing_time)
                 
+                # Отправка
                 client.send_message(chat, ad_text)
                 print(f"✅ УСПЕШНО ОТПРАВЛЕНО в {chat}")
                 
+                # Обновление статистики
                 update_stats(True)
                 db.add_history(ad["id"], chat, True)
                 
+                # Проверка дневного лимита
                 if CONFIG["stats"]["today_sent"] >= 100:
                     print("⚠️ Достигнут дневной лимит (100 сообщений). Пауза 30 мин.")
                     smart_delay(1800, 1800, "Дневной лимит")
@@ -258,6 +265,7 @@ def pro_sender_engine():
                 db.add_history(ad["id"], chat, False)
                 smart_delay(30, 60, "Пауза после ошибки")
             
+            # Пауза между чатами (кроме последнего)
             if idx < len(TARGET_CHATS) - 1:
                 smart_delay(
                     CONFIG["delay_between_chats"]["min"],
@@ -265,9 +273,11 @@ def pro_sender_engine():
                     "Пауза между чатами"
                 )
         
+        # Пауза между кругами
         if CONFIG["mailing_enabled"] and ads and client is not None:
             print(f"\n💤 КРУГ ЗАВЕРШЕН")
             
+            # Адаптивная пауза (если много ошибок)
             if CONFIG["stats"]["errors"] > 10:
                 wait_min, wait_max = 600, 900
                 print("⚠️ Много ошибок, увеличиваю паузу")
@@ -276,37 +286,37 @@ def pro_sender_engine():
             
             smart_delay(wait_min, wait_max, "Пауза между кругами")
             
+            # Сброс счетчика ошибок
             if CONFIG["stats"]["errors"] > 0:
                 CONFIG["stats"]["errors"] = max(0, CONFIG["stats"]["errors"] - 1)
 
-# ==================== ФУНКЦИИ АВТОРИЗАЦИИ ====================
+# ==================== ФУНКЦИИ АВТОРИЗАЦИИ ЧЕРЕЗ БОТА ====================
 
 @bot.message_handler(commands=['login'])
-def login_cmd(msg):
-    if msg.from_user.id != ADMIN_ID:
-        bot.reply_to(msg, "⛔ Доступ запрещен")
+def login_cmd(message):
+    """Начать авторизацию через бота"""
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Доступ запрещен")
         return
     
     if client is not None:
-        try:
-            me = client.get_me()
-            bot.reply_to(msg, f"✅ Вы уже авторизованы как @{me.username or me.first_name}\nИспользуйте /logout для выхода")
-            return
-        except:
-            global client
-            client = None
+        bot.reply_to(message, "✅ Вы уже авторизованы! Используйте /logout для выхода")
+        return
     
-    auth_data["step"] = "phone"
-    auth_data["phone"] = None
-    auth_data["code"] = None
-    auth_data["password"] = None
+    # Создаем сессию для пользователя
+    auth_sessions[message.chat.id] = {
+        "step": "phone",
+        "temp_client": None,
+        "phone": None
+    }
     
-    bot.reply_to(msg, "🔐 **Вход в аккаунт Telegram**\n\nВведите номер телефона в международном формате:\n`+71234567890`", parse_mode="Markdown")
+    bot.reply_to(message, "🔐 **Вход в аккаунт Telegram**\n\nВведите номер телефона в международном формате:\n`+71234567890`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['logout'])
-def logout_cmd(msg):
-    if msg.from_user.id != ADMIN_ID:
-        bot.reply_to(msg, "⛔ Доступ запрещен")
+def logout_cmd(message):
+    """Выйти из аккаунта"""
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Доступ запрещен")
         return
     
     global client
@@ -317,127 +327,120 @@ def logout_cmd(msg):
             pass
         client = None
     
-    auth_data["step"] = None
-    bot.reply_to(msg, "✅ Вы вышли из аккаунта Telegram")
+    bot.reply_to(message, "✅ Вы вышли из аккаунта Telegram")
 
 @bot.message_handler(commands=['cancel'])
-def cancel_auth_cmd(msg):
-    if msg.from_user.id != ADMIN_ID:
-        bot.reply_to(msg, "⛔ Доступ запрещен")
+def cancel_auth_cmd(message):
+    """Отменить авторизацию"""
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Доступ запрещен")
         return
     
-    if auth_data["client"]:
-        try:
-            auth_data["client"].disconnect()
-        except:
-            pass
+    if message.chat.id in auth_sessions:
+        if auth_sessions[message.chat.id]["temp_client"]:
+            try:
+                auth_sessions[message.chat.id]["temp_client"].disconnect()
+            except:
+                pass
+        del auth_sessions[message.chat.id]
     
-    auth_data["step"] = None
-    auth_data["client"] = None
-    bot.reply_to(msg, "❌ Авторизация отменена")
-
-def process_auth_step(message):
+    bot.reply_to(message, "❌ Авторизация отменена")
+    @bot.message_handler(func=lambda message: message.chat.id in auth_sessions)
+def handle_auth_steps(message):
+    """Обработка шагов авторизации"""
     global client
     
-    user_id = message.from_user.id
+    chat_id = message.chat.id
     text = message.text.strip()
+    session = auth_sessions[chat_id]
     
-    if auth_data["step"] == "phone":
+    if session["step"] == "phone":
+        # Проверка формата телефона
         if not re.match(r'^\+?\d{10,15}$', text):
-            bot.reply_to(message, "❌ Неверный формат номера. Пример: +71234567890\nПопробуйте снова или /cancel для отмены")
+            bot.reply_to(message, "❌ Неверный формат. Пример: +71234567890\nПопробуйте снова или /cancel")
             return
         
-        auth_data["phone"] = text
+        session["phone"] = text
+        session["step"] = "code"
         
         try:
-            temp_client = TelegramClient('temp_auth_session', API_ID, API_HASH)
-            auth_data["client"] = temp_client
+            # Создаем временный клиент
+            temp_client = TelegramClient(f'temp_session_{chat_id}', API_ID, API_HASH)
+            session["temp_client"] = temp_client
             
             bot.reply_to(message, "⏳ Отправка кода подтверждения...")
             temp_client.connect()
-            temp_client.send_code_request(auth_data["phone"])
+            temp_client.send_code_request(session["phone"])
             
-            auth_data["step"] = "code"
             bot.reply_to(message, "📱 **Код подтверждения отправлен**\n\nВведите код из Telegram (только цифры):\n_Пример: 12345_", parse_mode="Markdown")
             
         except Exception as e:
-            bot.reply_to(message, f"❌ Ошибка при отправке кода: {str(e)[:100]}\nПопробуйте /login заново")
-            auth_data["step"] = None
-            auth_data["client"] = None
+            bot.reply_to(message, f"❌ Ошибка: {str(e)[:100]}\nИспользуйте /login для новой попытки")
+            del auth_sessions[chat_id]
     
-    elif auth_data["step"] == "code":
+    elif session["step"] == "code":
+        # Проверка кода
         if not text.isdigit():
-            bot.reply_to(message, "❌ Код должен состоять только из цифр\nПопробуйте снова или /cancel для отмены")
+            bot.reply_to(message, "❌ Код должен содержать только цифры\nПопробуйте снова или /cancel")
             return
-        
-        auth_data["code"] = text
         
         try:
             bot.reply_to(message, "⏳ Проверка кода...")
             
-            auth_data["client"].sign_in(auth_data["phone"], auth_data["code"])
+            # Пробуем войти
+            session["temp_client"].sign_in(session["phone"], text)
             
-            client = auth_data["client"]
-            restart_engine_with_client()
+            # Успешный вход
+            client = session["temp_client"]
             
+            # Получаем информацию об аккаунте
             me = client.get_me()
-            bot.reply_to(message, f"✅ **Успешный вход!**\n\n👤 Аккаунт: @{me.username or me.first_name}\n🆔 ID: {me.id}\n\nТеперь можно запускать рассылку через /startmail", parse_mode="Markdown")
+            username = f"@{me.username}" if me.username else me.first_name
             
-            auth_data["step"] = None
-            auth_data["client"] = None
+            bot.reply_to(message, f"✅ **Успешный вход!**\n\n👤 Аккаунт: {username}\n🆔 ID: {me.id}\n\nТеперь рассылка будет работать! Используйте /startmail для запуска", parse_mode="Markdown")
+            
+            # Очищаем сессию авторизации
+            del auth_sessions[chat_id]
             
         except Exception as e:
             error_msg = str(e)
             
+            # Проверка на 2FA
             if "2FA" in error_msg or "password" in error_msg.lower():
-                auth_data["step"] = "password"
-                bot.reply_to(message, "🔐 **Требуется двухфакторная аутентификация**\n\nВведите пароль от аккаунта Telegram:")
+                session["step"] = "password"
+                bot.reply_to(message, "🔐 **Требуется пароль 2FA**\n\nВведите пароль от аккаунта Telegram:")
             else:
-                bot.reply_to(message, f"❌ Ошибка при проверке кода: {error_msg[:150]}\nПопробуйте /login заново")
-                auth_data["step"] = None
-                auth_data["client"] = None
+                bot.reply_to(message, f"❌ Ошибка: {error_msg[:150]}\nИспользуйте /login для новой попытки")
+                if session["temp_client"]:
+                    try:
+                        session["temp_client"].disconnect()
+                    except:
+                        pass
+                del auth_sessions[chat_id]
     
-    elif auth_data["step"] == "password":
-        auth_data["password"] = text
-        
+    elif session["step"] == "password":
         try:
             bot.reply_to(message, "⏳ Проверка пароля...")
             
-            auth_data["client"].sign_in(password=auth_data["password"])
+            session["temp_client"].sign_in(password=text)
             
-            client = auth_data["client"]
-            restart_engine_with_client()
+            client = session["temp_client"]
             
             me = client.get_me()
-            bot.reply_to(message, f"✅ **Успешный вход!**\n\n👤 Аккаунт: @{me.username or me.first_name}\n🆔 ID: {me.id}\n\nТеперь можно запускать рассылку через /startmail", parse_mode="Markdown")
+            username = f"@{me.username}" if me.username else me.first_name
             
-            auth_data["step"] = None
-            auth_data["client"] = None
+            bot.reply_to(message, f"✅ **Успешный вход!**\n\n👤 Аккаунт: {username}\n🆔 ID: {me.id}\n\nТеперь рассылка будет работать! Используйте /startmail для запуска", parse_mode="Markdown")
+            
+            del auth_sessions[chat_id]
             
         except Exception as e:
-            bot.reply_to(message, f"❌ Ошибка: {str(e)[:150]}\nПопробуйте /login заново")
-            auth_data["step"] = None
-            auth_data["client"] = None
-
-def restart_engine_with_client():
-    global mailing_thread, CONFIG
-    
-    was_running = CONFIG["mailing_enabled"]
-    
-    if was_running:
-        CONFIG["mailing_enabled"] = False
-        time.sleep(2)
-    
-    if mailing_thread and mailing_thread.is_alive():
-        pass
-    else:
-        mailing_thread = threading.Thread(target=pro_sender_engine, daemon=True)
-        mailing_thread.start()
-    
-    if was_running:
-        time.sleep(3)
-        CONFIG["mailing_enabled"] = True
-        print("🔄 Движок перезапущен с новым клиентом")
+            bot.reply_to(message, f"❌ Ошибка: {str(e)[:150]}\nИспользуйте /login для новой попытки")
+            if session["temp_client"]:
+                try:
+                    session["temp_client"].disconnect()
+                except:
+                    pass
+            del auth_sessions[chat_id]
 
 # ==================== КОМАНДЫ БОТА ====================
 
@@ -458,7 +461,7 @@ def start_cmd(msg):
     info = f"""
 🔐 **KORECKT V2.0 - УЛЬТИМАТИВНЫЙ РАССЫЛЬЩИК**
 
-🔑 **Аккаунт:** {auth_status}
+🔑 **Статус аккаунта:** {auth_status}
 
 📋 **Управление:**
 /login - Войти в аккаунт Telegram
@@ -509,7 +512,7 @@ def list_ads_cmd(msg):
         return
     
     response = "📝 **Список объявлений:**\n\n"
-    for ad in ads[-10:]:
+    for ad in ads[-10:]:  # Показываем последние 10
         preview = ad['text'][:60] + "..." if len(ad['text']) > 60 else ad['text']
         response += f"*ID {ad['id']}:* {preview}\n\n"
     
@@ -588,13 +591,7 @@ def start_mail_cmd(msg):
     if msg.from_user.id != ADMIN_ID: return
     
     if client is None:
-        bot.reply_to(msg, "❌ **Сначала войдите в аккаунт!**\n\nИспользуйте команду /login для авторизации")
-        return
-    
-    try:
-        client.get_me()
-    except Exception as e:
-        bot.reply_to(msg, f"❌ **Сессия устарела!**\nОшибка: {str(e)[:50]}\n\nИспользуйте /login для повторного входа")
+        bot.reply_to(msg, "❌ **Сначала войдите в аккаунт!**\n\nИспользуйте /login для авторизации")
         return
     
     if len(db.get_ads()) == 0:
@@ -664,45 +661,26 @@ def set_round_cmd(msg):
     except:
         bot.reply_to(msg, "❌ Использование: /setround 300 600")
 
-# Обработчик для шагов авторизации
-@bot.message_handler(func=lambda msg: msg.from_user.id == ADMIN_ID and auth_data["step"] is not None)
-def handle_auth_steps(msg):
-    process_auth_step(msg)
-
 # Запуск
 if __name__ == "__main__":
     print("=" * 50)
     print("🔥 KORECKT ULTIMATE V2.0 ДЛЯ RENDER")
     print("=" * 50)
     
-    # Проверка переменных окружения
-    if not BOT_TOKEN:
-        print("❌ ОШИБКА: BOT_TOKEN не задан!")
-    if not API_ID or not API_HASH:
-        print("❌ ОШИБКА: API_ID или API_HASH не заданы!")
-    if ADMIN_ID == 0:
-        print("⚠️ ВНИМАНИЕ: ADMIN_ID не задан!")
-    
-    print(f"🤖 Бот токен: {'✅' if BOT_TOKEN else '❌'}")
-    print(f"🔑 API данные: {'✅' if API_ID and API_HASH else '❌'}")
-    print(f"👤 Admin ID: {ADMIN_ID if ADMIN_ID != 0 else '❌'}")
-    print(f"🎯 Целевые чаты: {len(TARGET_CHATS)}")
-    print("=" * 50)
-    
-    # Запуск движка
+    # Запуск движка в отдельном потоке (будет ждать авторизации)
     mailing_thread = threading.Thread(target=pro_sender_engine, daemon=True)
     mailing_thread.start()
     
     print("🤖 Бот запущен и готов к работе!")
+    print(f"👤 Ваш ID: {ADMIN_ID}")
     print("📱 Откройте Telegram и напишите /start")
     print("🔑 Для входа в аккаунт используйте /login")
     print("=" * 50)
     
-    # Запуск бота с правильными параметрами
+    # Запуск бота
     while True:
         try:
-            # Убираем все лишние параметры, оставляем только базовые
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
         except Exception as e:
-            print(f"⚠️ Ошибка в polling: {e}")
+            print(f"⚠️ Ошибка: {e}")
             time.sleep(5)
