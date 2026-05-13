@@ -311,8 +311,7 @@ def login_cmd(message):
     }
     
     bot.reply_to(message, "🔐 **Вход в аккаунт Telegram**\n\nВведите номер телефона в международном формате:\n`+71234567890`", parse_mode="Markdown")
-
-@bot.message_handler(commands=['logout'])
+        @bot.message_handler(commands=['logout'])
 def logout_cmd(message):
     """Выйти из аккаунта"""
     if message.from_user.id != ADMIN_ID:
@@ -345,7 +344,8 @@ def cancel_auth_cmd(message):
         del auth_sessions[message.chat.id]
     
     bot.reply_to(message, "❌ Авторизация отменена")
-    @bot.message_handler(func=lambda message: message.chat.id in auth_sessions)
+
+@bot.message_handler(func=lambda message: message.chat.id in auth_sessions)
 def handle_auth_steps(message):
     """Обработка шагов авторизации"""
     global client
