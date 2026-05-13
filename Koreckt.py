@@ -2,25 +2,29 @@ import telebot
 from telethon.sync import TelegramClient
 from telethon import functions, types
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
-import sqlite3
 import threading
 import time
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import re
 import os
+import signal
+import sys
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH")
-TARGET_CHATS = os.environ.get("TARGET_CHATS", "").split(",")
+TARGET_CHATS = [chat.strip() for chat in os.environ.get("TARGET_CHATS", "").split(",") if chat.strip()]
 # ===================================================
 
 # Состояния авторизации
-auth_sessions = {}  # {chat_id: {"step": "phone", "phone": "", "client": None}}
+auth_sessions = {}
+
+# Флаг для контроля polling
+polling_active = True
 
 # Конфигурация
 CONFIG = {
@@ -38,11 +42,11 @@ CONFIG = {
     "smart_delays": True
 }
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)  # threaded=False для избежания конфликтов
 client = None
 mailing_thread = None
 
-# Эмуляция базы данных через JSON
+# ==================== БАЗА ДАННЫХ ====================
 class SimpleDB:
     def __init__(self, filename="koreckt_data.json"):
         self.filename = filename
@@ -98,6 +102,7 @@ class SimpleDB:
 
 db = SimpleDB()
 
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def update_stats(sent=True):
     today = datetime.now().date().isoformat()
     if CONFIG["stats"]["last_date"] != today:
@@ -125,7 +130,7 @@ def smart_delay(min_sec, max_sec, reason=""):
         time.sleep(1)
 
 def calculate_typing_time(text):
-    speed = random.uniform(CONFIG["typing_speed"]["min"], CONFIG["typing_speed"]["max"])
+    speed = random.uniform(5, 12)
     base_time = len(text) / speed
     punctuation = text.count('.') * 0.25 + text.count(',') * 0.15 + text.count('!') * 0.2 + text.count('?') * 0.2
     punctuation += text.count('\n') * 0.5
@@ -143,6 +148,7 @@ def format_message_with_emoji(text):
         text = f"{emoji} {text}"
     return text
 
+# ==================== ДВИЖОК РАССЫЛКИ ====================
 def pro_sender_engine():
     """Мощный движок рассылки"""
     global client
@@ -157,6 +163,17 @@ def pro_sender_engine():
         
         if client is None or not client.is_connected():
             print("⚠️ Клиент не подключен, ждем авторизации...")
+            time.sleep(10)
+            continue
+        
+        try:
+            # Проверяем авторизацию
+            if not client.is_user_authorized():
+                print("⚠️ Клиент не авторизован, ждем...")
+                time.sleep(10)
+                continue
+        except:
+            print("⚠️ Ошибка проверки авторизации")
             time.sleep(10)
             continue
         
@@ -235,10 +252,8 @@ def pro_sender_engine():
             if CONFIG["stats"]["errors"] > 0:
                 CONFIG["stats"]["errors"] = max(0, CONFIG["stats"]["errors"] - 1)
 
-# ==================== АВТОРИЗАЦИЯ ЧЕРЕЗ БОТА ====================
-
+# ==================== АВТОРИЗАЦИЯ ====================
 def check_auth_status():
-    """Проверка статуса авторизации"""
     global client
     try:
         if client and client.is_connected() and client.is_user_authorized():
@@ -250,7 +265,6 @@ def check_auth_status():
 
 @bot.message_handler(commands=['auth'])
 def auth_cmd(msg):
-    """Начать авторизацию"""
     if msg.from_user.id != ADMIN_ID:
         bot.reply_to(msg, "⛔ Доступ запрещен")
         return
@@ -265,7 +279,6 @@ def auth_cmd(msg):
 
 @bot.message_handler(commands=['reauth'])
 def reauth_cmd(msg):
-    """Переавторизация"""
     if msg.from_user.id != ADMIN_ID:
         return
     
@@ -282,7 +295,6 @@ def reauth_cmd(msg):
 
 @bot.message_handler(commands=['cancel'])
 def cancel_auth(msg):
-    """Отмена авторизации"""
     if msg.from_user.id != ADMIN_ID:
         return
     
@@ -291,10 +303,8 @@ def cancel_auth(msg):
     bot.reply_to(msg, "❌ Авторизация отменена")
 
 def process_phone_number(msg):
-    """Обработка номера телефона"""
     phone = msg.text.strip()
     
-    # Простая валидация
     if not re.match(r'^\+?\d{10,15}$', phone):
         bot.reply_to(msg, "❌ Неверный формат номера. Используйте:\n`+71234567890`\n\nПопробуйте снова или /cancel", parse_mode="Markdown")
         return False
@@ -303,7 +313,6 @@ def process_phone_number(msg):
         phone = '+' + phone
     
     try:
-        # Создаем временный клиент
         temp_client = TelegramClient(f'temp_session_{msg.chat.id}', API_ID, API_HASH)
         temp_client.connect()
         
@@ -325,7 +334,6 @@ def process_phone_number(msg):
         return False
 
 def process_code(msg):
-    """Обработка кода подтверждения"""
     code = msg.text.strip()
     
     if not code.isdigit():
@@ -341,10 +349,8 @@ def process_code(msg):
     phone = session_data["phone"]
     
     try:
-        # Пытаемся войти с кодом
         temp_client.sign_in(phone, code)
         
-        # Успешный вход
         global client
         if client:
             try:
@@ -352,28 +358,23 @@ def process_code(msg):
             except:
                 pass
         
-        # Сохраняем сессию
         session_file = "kor_session"
         temp_client.disconnect()
         
-        # Создаем постоянный клиент
         client = TelegramClient(session_file, API_ID, API_HASH)
         client.connect()
         
         if not client.is_user_authorized():
-            # Если не авторизован, используем временные данные
             client.sign_in(phone, code)
         
         me = client.get_me()
         
-        # Очищаем временные данные
         del auth_sessions[msg.chat.id]
         
         bot.reply_to(msg, f"✅ **Авторизация успешна!**\n\n👤 Имя: {me.first_name}\n📱 Username: @{me.username if me.username else 'нет'}\n🆔 ID: {me.id}\n\n🚀 Теперь можно запускать рассылку: /startmail", parse_mode="Markdown")
         
         # Перезапускаем движок
-        if mailing_thread and not mailing_thread.is_alive():
-            restart_mailing_thread()
+        restart_mailing_thread()
         
         return True
         
@@ -391,7 +392,6 @@ def process_code(msg):
         return False
 
 def process_password(msg):
-    """Обработка 2FA пароля"""
     password = msg.text.strip()
     
     session_data = auth_sessions.get(msg.chat.id)
@@ -425,8 +425,7 @@ def process_password(msg):
         
         bot.reply_to(msg, f"✅ **Авторизация успешна!**\n\n👤 Имя: {me.first_name}\n📱 Username: @{me.username if me.username else 'нет'}\n🆔 ID: {me.id}\n\n🚀 Теперь можно запускать рассылку: /startmail", parse_mode="Markdown")
         
-        if mailing_thread and not mailing_thread.is_alive():
-            restart_mailing_thread()
+        restart_mailing_thread()
         
         return True
         
@@ -436,7 +435,6 @@ def process_password(msg):
 
 @bot.message_handler(func=lambda msg: msg.chat.id in auth_sessions)
 def auth_handler(msg):
-    """Обработчик шагов авторизации"""
     if msg.from_user.id != ADMIN_ID:
         return
     
@@ -450,10 +448,10 @@ def auth_handler(msg):
         process_password(msg)
 
 # ==================== КОМАНДЫ БОТА ====================
-
 def restart_mailing_thread():
-    """Перезапуск потока рассылки"""
     global mailing_thread
+    if mailing_thread and mailing_thread.is_alive():
+        return
     mailing_thread = threading.Thread(target=pro_sender_engine, daemon=True)
     mailing_thread.start()
 
@@ -637,7 +635,7 @@ def config_cmd(msg):
 
 ⏱️ Паузы между чатами: {CONFIG['delay_between_chats']['min']}-{CONFIG['delay_between_chats']['max']} сек
 🔄 Паузы между кругами: {CONFIG['delay_between_rounds']['min']}-{CONFIG['delay_between_rounds']['max']} сек
-⌨️ Скорость печати: {CONFIG['typing_speed']['min']}-{CONFIG['typing_speed']['max']} симв/сек
+⌨️ Скорость печати: 5-12 симв/сек
 🛡️ Анти-флуд: {"ВКЛ" if CONFIG['anti_flood'] else "ВЫКЛ"}
 🧠 Умные задержки: {"ВКЛ" if CONFIG['smart_delays'] else "ВЫКЛ"}
 
@@ -673,13 +671,16 @@ def set_round_cmd(msg):
     except:
         bot.reply_to(msg, "❌ Использование: /setround 300 600")
 
-# ==================== ЗАПУСК ====================
-if __name__ == "__main__":
+# ==================== ЗАПУСК С ОБРАБОТКОЙ ОШИБОК ====================
+def run_bot():
+    """Запуск бота с обработкой ошибки 409"""
+    global polling_active
+    
     print("=" * 50)
     print("🔥 KORECKT ULTIMATE V2.0")
     print("=" * 50)
     
-    # Запуск движка в отдельном потоке
+    # Запуск движка
     restart_mailing_thread()
     
     print("🤖 Бот запущен и готов к работе!")
@@ -688,10 +689,28 @@ if __name__ == "__main__":
     print("🔐 Для авторизации используйте /auth")
     print("=" * 50)
     
-    # Запуск бота
-    while True:
+    # Запуск polling с обработкой ошибок
+    while polling_active:
         try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            # Используем remove_webhook для очистки вебхука
+            bot.remove_webhook()
+            time.sleep(1)
+            
+            # Запускаем polling
+            bot.infinity_polling(
+                timeout=60,
+                long_polling_timeout=60,
+                restart_on_true=True
+            )
         except Exception as e:
-            print(f"⚠️ Ошибка: {e}")
-            time.sleep(5)
+            error_msg = str(e)
+            if "409" in error_msg or "Conflict" in error_msg:
+                print("⚠️ Обнаружен конфликт (409). Перезапуск через 10 секунд...")
+                time.sleep(10)
+                continue
+            else:
+                print(f"⚠️ Ошибка: {error_msg}")
+                time.sleep(5)
+
+if __name__ == "__main__":
+    run_bot()
