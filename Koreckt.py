@@ -469,7 +469,59 @@ def start_flask():
         app.run(host="0.0.0.0", port=port)
     except:
         pass
+auth_sessions = {}
 
+@bot.message_handler(commands=['clean_session'])
+def clean_session(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    if os.path.exists("kor_session.session"):
+        os.remove("kor_session.session")
+        bot.reply_to(msg, "✅ Старая сессия удалена!\nТеперь используйте /create_session")
+    else:
+        bot.reply_to(msg, "❌ Файла сессии нет")
+
+@bot.message_handler(commands=['create_session'])
+def create_session(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    bot.reply_to(msg, "🔐 Введите номер телефона:\n+380XXXXXXXXX")
+    auth_sessions[msg.chat.id] = {"step": "phone"}
+
+@bot.message_handler(func=lambda m: m.chat.id in auth_sessions)
+def auth_handler(msg):
+    chat_id = msg.chat.id
+    step = auth_sessions[chat_id]["step"]
+    
+    if step == "phone":
+        phone = msg.text.strip()
+        if not phone.startswith("+"):
+            phone = "+" + phone
+        
+        try:
+            temp = TelegramClient(f'temp_{chat_id}', API_ID, API_HASH)
+            temp.connect()
+            temp.send_code_request(phone)
+            auth_sessions[chat_id] = {"step": "code", "phone": phone, "client": temp}
+            bot.reply_to(msg, "📱 Введите код из Telegram:")
+        except Exception as e:
+            bot.reply_to(msg, f"❌ Ошибка: {e}")
+            
+    elif step == "code":
+        code = msg.text.strip()
+        data = auth_sessions[chat_id]
+        
+        try:
+            data["client"].sign_in(data["phone"], code)
+            global client
+            client = TelegramClient("kor_session", API_ID, API_HASH)
+            client.connect()
+            client.sign_in(data["phone"], code)
+            me = client.get_me()
+            del auth_sessions[chat_id]
+            bot.reply_to(msg, f"✅ **Новая сессия создана!**\n\n👤 {me.first_name}\n🆔 {me.id}\n\n🚀 Теперь /startmail")
+        except Exception as e:
+            bot.reply_to(msg, f"❌ Ошибка: {e}")
 # ==================== ЗАПУСК ====================
 if __name__ == "__main__":
     print("=" * 50)
