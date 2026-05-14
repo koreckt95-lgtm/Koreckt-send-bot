@@ -1,24 +1,25 @@
 import telebot
 from telethon.sync import TelegramClient
-from telethon.errors import FloodWaitError, SessionPasswordNeededError
+from telethon.errors import FloodWaitError
 import threading
 import time
 import random
 import json
 import os
-import asyncio
 from datetime import datetime
 
-# ==================== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ====================
+# ==================== ПЕРЕМЕННЫЕ ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH")
 
-# ==================== ФАЙЛЫ ====================
+# Файлы
 CHATS_FILE = "chats.json"
 ADS_FILE = "ads.json"
+SESSION_FILE = "kor_session.session"  # Загруженный файл сессии
 
+# ==================== ЗАГРУЗКА ДАННЫХ ====================
 def load_chats():
     try:
         with open(CHATS_FILE, 'r') as f:
@@ -41,7 +42,7 @@ def save_ads(ads):
     with open(ADS_FILE, 'w') as f:
         json.dump(ads, f)
 
-# ==================== НАСТРОЙКИ ====================
+# Настройки
 config = {
     "delay_min": 150,
     "delay_max": 400,
@@ -51,129 +52,57 @@ config = {
 
 stats = {"sent": 0, "errors": 0, "today": 0, "last_date": datetime.now().date().isoformat()}
 
-# ==================== ГЛОБАЛЬНЫЕ ====================
+# ==================== БОТ ====================
 bot = telebot.TeleBot(BOT_TOKEN)
 client = None
-mailing_thread = None
-auth_sessions = {}
 temp_media = {}
 
-# ==================== АВТОРИЗАЦИЯ (ИСПРАВЛЕНА) ====================
-@bot.message_handler(commands=['login'])
-def login_cmd(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    auth_sessions[msg.chat.id] = {"step": "phone"}
-    bot.reply_to(msg, "🔐 Введите номер телефона:\nПример: +380123456789")
-
-@bot.message_handler(commands=['logout'])
-def logout_cmd(msg):
+def init_client():
+    """Инициализация клиента с готовой сессией"""
     global client
-    if msg.from_user.id != ADMIN_ID:
-        return
-    if client:
-        try:
-            client.disconnect()
-        except:
-            pass
-        client = None
-    bot.reply_to(msg, "✅ Выход выполнен")
-
-def process_auth(msg):
-    chat_id = msg.chat.id
-    step = auth_sessions[chat_id]["step"]
-    
-    if step == "phone":
-        phone = msg.text.strip()
-        if not phone.startswith("+"):
-            phone = "+" + phone
-        
-        try:
-            # СОЗДАЁМ НОВЫЙ КЛИЕНТ
-            temp = TelegramClient(f'temp_{chat_id}', API_ID, API_HASH)
-            temp.connect()
-            temp.send_code_request(phone)
-            auth_sessions[chat_id] = {"step": "code", "phone": phone, "client": temp}
-            bot.reply_to(msg, "📱 Введите код из Telegram:")
-        except Exception as e:
-            bot.reply_to(msg, f"❌ Ошибка: {str(e)[:100]}")
-            
-    elif step == "code":
-        code = msg.text.strip()
-        data = auth_sessions[chat_id]
-        
-        try:
-            data["client"].sign_in(data["phone"], code)
-            global client
-            # СОХРАНЯЕМ СЕССИЮ
-            client = TelegramClient("kor_session", API_ID, API_HASH)
+    try:
+        if os.path.exists(SESSION_FILE):
+            print(f"✅ Найден файл сессии: {SESSION_FILE}")
+            client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
             client.connect()
-            client.sign_in(data["phone"], code)
-            me = client.get_me()
-            del auth_sessions[chat_id]
-            bot.reply_to(msg, f"✅ Авторизован: {me.first_name}\n\n/start - главное меню")
-        except SessionPasswordNeededError:
-            auth_sessions[chat_id]["step"] = "password"
-            bot.reply_to(msg, "🔐 Введите 2FA пароль:")
-        except Exception as e:
-            bot.reply_to(msg, f"❌ Ошибка: {str(e)[:100]}")
             
-    elif step == "password":
-        pwd = msg.text.strip()
-        data = auth_sessions[chat_id]
-        
-        try:
-            data["client"].sign_in(password=pwd)
-            client = TelegramClient("kor_session", API_ID, API_HASH)
-            client.connect()
-            client.sign_in(password=pwd)
-            me = client.get_me()
-            del auth_sessions[chat_id]
-            bot.reply_to(msg, f"✅ Авторизован: {me.first_name}\n\n/start - главное меню")
-        except Exception as e:
-            bot.reply_to(msg, f"❌ Ошибка: {str(e)[:100]}")
+            if client.is_user_authorized():
+                me = client.get_me()
+                print(f"✅ Авторизован: {me.first_name} (@{me.username})")
+                return True
+            else:
+                print("❌ Сессия не активна, нужна переавторизация")
+                return False
+        else:
+            print("❌ Файл сессии не найден!")
+            return False
+    except Exception as e:
+        print(f"❌ Ошибка инициализации: {e}")
+        return False
 
 # ==================== ОТПРАВКА ====================
 def send_message(chat, text, photo=None):
     global client
     try:
-        if not client or not client.is_connected():
-            return False
-        
         if photo:
             client.send_file(chat, photo, caption=text)
         else:
-            # Имитация печати
             time.sleep(random.uniform(2, 6))
             client.send_message(chat, text)
         return True
     except FloodWaitError as e:
-        print(f"Flood wait: {e.seconds}")
-        time.sleep(e.seconds + 5)
+        print(f"Flood: {e.seconds} сек")
+        time.sleep(e.seconds)
         return False
     except Exception as e:
-        print(f"Send error: {e}")
+        print(f"Ошибка: {e}")
         return False
 
 def mailing_loop():
-    global stats, client
-    
+    global stats
     while True:
-        if not config["active"]:
+        if not config["active"] or not client:
             time.sleep(2)
-            continue
-        
-        if not client or not client.is_connected():
-            time.sleep(10)
-            continue
-        
-        try:
-            # Проверка авторизации
-            if not client.is_user_authorized():
-                time.sleep(10)
-                continue
-        except:
-            time.sleep(10)
             continue
         
         ads = load_ads()
@@ -191,12 +120,9 @@ def mailing_loop():
         
         if stats["today"] >= config["daily_limit"]:
             config["active"] = False
-            print("Дневной лимит достигнут")
             continue
         
-        # Выбираем случайное объявление
         ad = random.choice(ads)
-        
         print(f"Рассылка: {ad.get('text', '')[:50]}...")
         
         for chat in chats:
@@ -214,70 +140,50 @@ def mailing_loop():
                 print(f"❌ {chat}")
                 time.sleep(60)
             
-            # Пауза между чатами
-            delay = random.uniform(config["delay_min"], config["delay_max"])
-            print(f"Пауза {delay:.0f} сек...")
-            time.sleep(delay)
+            time.sleep(random.uniform(config["delay_min"], config["delay_max"]))
         
-        # Пауза между кругами
-        print("Круг завершён, пауза 5-10 минут...")
+        print("Круг завершён, пауза...")
         time.sleep(random.uniform(300, 600))
 
-# ==================== КОМАНДЫ ====================
+# ==================== КОМАНДЫ БОТА ====================
 @bot.message_handler(commands=['start'])
 def start_cmd(msg):
     if msg.from_user.id != ADMIN_ID:
-        bot.reply_to(msg, "⛔ Доступ запрещён")
         return
     
     is_auth = client and client.is_connected() if client else False
-    try:
-        if is_auth:
-            me = client.get_me()
-            auth_text = f"✅ {me.first_name}"
-        else:
-            auth_text = "❌ Не авторизован"
-    except:
-        auth_text = "❌ Не авторизован"
-    
-    ads_count = len(load_ads())
-    chats_count = len(load_chats())
+    auth_status = "✅" if is_auth else "❌"
     
     text = f"""
 🤖 **KORECKT БОТ**
 
-🔐 Авторизация: {auth_text}
-📝 Объявлений: {ads_count}
-🎯 Чатов: {chats_count}
-📊 Отправлено сегодня: {stats['today']}/{config['daily_limit']}
-🚀 Рассылка: {'🟢 Активна' if config['active'] else '🔴 Остановлена'}
+🔐 Статус: {auth_status}
+📝 Объявлений: {len(load_ads())}
+🎯 Чатов: {len(load_chats())}
+📊 Сегодня: {stats['today']}/{config['daily_limit']}
+🚀 Рассылка: {'✅' if config['active'] else '❌'}
 
 ━━━━━━━━━━━━━━━━━
 
 📝 **ОБЪЯВЛЕНИЯ:**
-/add_text Текст - Текст
-/add_photo - Фото + текст
-/list - Список
-/del [ID] - Удалить
+/add_text Текст - текст
+/add_photo - фото+текст
+/list - список
+/del [ID] - удалить
 
 🎯 **ЧАТЫ:**
-/addchat [ссылка] - Добавить
-/removechat [ID] - Удалить
-/listchats - Список
+/addchat [ссылка] - добавить
+/removechat [ID] - удалить
+/listchats - список
 
 🚀 **УПРАВЛЕНИЕ:**
-/startmail - Запуск
-/stopmail - Остановка
-/setdelay [мин] [макс] - Пауза
-/setdaily [лимит] - Лимит
-
-🔐 **АВТОРИЗАЦИЯ:**
-/login - Войти
-/logout - Выйти
-/check - Проверить
+/startmail - запуск
+/stopmail - остановка
+/setdelay 150 400 - пауза
+/setdaily 100 - лимит
 
 📊 **СТАТИСТИКА:**
-/stats - Показать
+/stats - показать
 """
     bot.reply_to(msg, text, parse_mode="Markdown")
 
@@ -287,14 +193,14 @@ def add_text(msg):
         return
     text = msg.text.replace('/add_text', '').strip()
     if not text:
-        bot.reply_to(msg, "❌ /add_text Текст объявления")
+        bot.reply_to(msg, "❌ /add_text Текст")
         return
     
     ads = load_ads()
     ad_id = len(ads) + 1
     ads.append({"id": ad_id, "type": "text", "text": text, "photo": None})
     save_ads(ads)
-    bot.reply_to(msg, f"✅ Объявление #{ad_id} добавлено")
+    bot.reply_to(msg, f"✅ Объявление #{ad_id}")
 
 @bot.message_handler(commands=['add_photo'])
 def add_photo(msg):
@@ -307,13 +213,13 @@ def add_photo(msg):
 def skip_text(msg):
     if msg.chat.id not in temp_media:
         return
-    data = temp_media[msg.chat.id]
-    if "photo" in data:
+    if "photo" in temp_media[msg.chat.id]:
+        data = temp_media[msg.chat.id]
         ads = load_ads()
         ad_id = len(ads) + 1
         ads.append({"id": ad_id, "type": "photo", "text": "", "photo": data["photo"]})
         save_ads(ads)
-        bot.reply_to(msg, f"✅ Объявление #{ad_id} (фото без текста)")
+        bot.reply_to(msg, f"✅ Объявление #{ad_id}")
     del temp_media[msg.chat.id]
 
 @bot.message_handler(content_types=['photo'])
@@ -322,7 +228,7 @@ def handle_photo(msg):
         return
     photo = msg.photo[-1].file_id
     temp_media[msg.chat.id] = {"step": "text", "photo": photo}
-    bot.reply_to(msg, "📝 Отправьте ТЕКСТ для фото (или /skip)")
+    bot.reply_to(msg, "📝 Отправьте ТЕКСТ (или /skip)")
 
 @bot.message_handler(func=lambda m: m.chat.id in temp_media and temp_media[m.chat.id].get("step") == "text")
 def handle_text(msg):
@@ -332,7 +238,7 @@ def handle_text(msg):
     ads.append({"id": ad_id, "type": "photo", "text": msg.text, "photo": data["photo"]})
     save_ads(ads)
     del temp_media[msg.chat.id]
-    bot.reply_to(msg, f"✅ Объявление #{ad_id} (фото + текст)")
+    bot.reply_to(msg, f"✅ Объявление #{ad_id} (фото+текст)")
 
 @bot.message_handler(commands=['list'])
 def list_ads(msg):
@@ -340,7 +246,7 @@ def list_ads(msg):
         return
     ads = load_ads()
     if not ads:
-        bot.reply_to(msg, "📭 Нет объявлений")
+        bot.reply_to(msg, "📭 Нет")
         return
     
     text = "📝 **Объявления:**\n\n"
@@ -358,7 +264,7 @@ def del_ad(msg):
         ads = load_ads()
         ads = [a for a in ads if a["id"] != ad_id]
         save_ads(ads)
-        bot.reply_to(msg, f"✅ Объявление #{ad_id} удалено")
+        bot.reply_to(msg, f"✅ #{ad_id} удалено")
     except:
         bot.reply_to(msg, "❌ /del 1")
 
@@ -379,9 +285,9 @@ def add_chat(msg):
     if chat not in chats:
         chats.append(chat)
         save_chats(chats)
-        bot.reply_to(msg, f"✅ Чат добавлен: {chat}")
+        bot.reply_to(msg, f"✅ {chat}")
     else:
-        bot.reply_to(msg, "⚠️ Чат уже есть")
+        bot.reply_to(msg, "⚠️ Уже есть")
 
 @bot.message_handler(commands=['removechat'])
 def remove_chat(msg):
@@ -398,7 +304,7 @@ def remove_chat(msg):
         if 0 <= idx < len(chats):
             removed = chats.pop(idx)
             save_chats(chats)
-            bot.reply_to(msg, f"✅ Удалено: {removed}")
+            bot.reply_to(msg, f"✅ {removed}")
         else:
             bot.reply_to(msg, "❌ Неверный номер")
     else:
@@ -406,7 +312,7 @@ def remove_chat(msg):
         if chat in chats:
             chats.remove(chat)
             save_chats(chats)
-            bot.reply_to(msg, f"✅ Удалено: {chat}")
+            bot.reply_to(msg, f"✅ {chat}")
 
 @bot.message_handler(commands=['listchats'])
 def list_chats(msg):
@@ -414,7 +320,7 @@ def list_chats(msg):
         return
     chats = load_chats()
     if not chats:
-        bot.reply_to(msg, "📭 Нет чатов")
+        bot.reply_to(msg, "📭 Нет")
         return
     
     text = "🎯 **Чаты:**\n\n"
@@ -429,28 +335,25 @@ def list_chats(msg):
 def start_mail(msg):
     if msg.from_user.id != ADMIN_ID:
         return
-    
-    if not client or not client.is_connected():
-        bot.reply_to(msg, "❌ Сначала авторизуйтесь: /login")
+    if not client:
+        bot.reply_to(msg, "❌ Нет сессии. Загрузите файл kor_session.session")
         return
-    
     if len(load_ads()) == 0:
-        bot.reply_to(msg, "❌ Нет объявлений: /add_text")
+        bot.reply_to(msg, "❌ Нет объявлений")
         return
-    
     if len(load_chats()) == 0:
-        bot.reply_to(msg, "❌ Нет чатов: /addchat")
+        bot.reply_to(msg, "❌ Нет чатов")
         return
     
     config["active"] = True
-    bot.reply_to(msg, "🚀 **Рассылка запущена!**\n/stopmail - остановить")
+    bot.reply_to(msg, "🚀 **Рассылка запущена!**")
 
 @bot.message_handler(commands=['stopmail'])
 def stop_mail(msg):
     if msg.from_user.id != ADMIN_ID:
         return
     config["active"] = False
-    bot.reply_to(msg, "🛑 **Рассылка остановлена**")
+    bot.reply_to(msg, "🛑 **Остановлено**")
 
 @bot.message_handler(commands=['setdelay'])
 def set_delay(msg):
@@ -460,7 +363,7 @@ def set_delay(msg):
         parts = msg.text.replace('/setdelay', '').strip().split()
         config["delay_min"] = int(parts[0])
         config["delay_max"] = int(parts[1])
-        bot.reply_to(msg, f"✅ Пауза: {config['delay_min']}-{config['delay_max']} сек")
+        bot.reply_to(msg, f"✅ {config['delay_min']}-{config['delay_max']} сек")
     except:
         bot.reply_to(msg, "❌ /setdelay 150 400")
 
@@ -488,7 +391,7 @@ def show_stats(msg):
     text = f"""
 📊 **СТАТИСТИКА**
 
-📨 Всего отправлено: {stats['sent']}
+📨 Отправлено: {stats['sent']}
 ❌ Ошибок: {stats['errors']}
 📈 Успешность: {success_rate:.1f}%
 
@@ -496,7 +399,7 @@ def show_stats(msg):
 🎯 Чатов: {len(load_chats())}
 📝 Объявлений: {len(load_ads())}
 
-🚀 Рассылка: {'🟢 Активна' if config['active'] else '🔴 Остановлена'}
+🚀 Рассылка: {'✅' if config['active'] else '❌'}
 """
     bot.reply_to(msg, text, parse_mode="Markdown")
 
@@ -504,56 +407,57 @@ def show_stats(msg):
 def check_account(msg):
     if msg.from_user.id != ADMIN_ID:
         return
-    
-    if not client or not client.is_connected():
-        bot.reply_to(msg, "❌ Не авторизован. /login")
+    if not client:
+        bot.reply_to(msg, "❌ Нет сессии")
         return
     
     try:
         me = client.get_me()
         text = f"""
-✅ **Аккаунт в порядке**
+✅ **Аккаунт**
 
-👤 Имя: {me.first_name}
-🆔 ID: {me.id}
+👤 {me.first_name}
+🆔 {me.id}
 📱 Premium: {'Да' if me.premium else 'Нет'}
 
-⚠️ Бан: Не обнаружен
+⚠️ Бан: Нет
 """
         bot.reply_to(msg, text, parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(msg, f"❌ Ошибка: {str(e)[:100]}")
-
-@bot.message_handler(func=lambda m: m.chat.id in auth_sessions)
-def auth_handler(msg):
-    process_auth(msg)
+        bot.reply_to(msg, f"❌ {e}")
 
 # ==================== ЗАПУСК ====================
 if __name__ == "__main__":
-    print("🤖 Бот запущен")
+    print("🤖 KORECKT БОТ")
+    print("=" * 40)
     
-    # Запуск рассылки в фоне
+    # Загружаем сессию
+    if init_client():
+        print("✅ Готов к работе!")
+    else:
+        print("⚠️ Сессия не загружена, рассылка не будет работать")
+    
+    # Запуск рассылки
     thread = threading.Thread(target=mailing_loop, daemon=True)
     thread.start()
     
     # Flask для Render
     try:
         from flask import Flask
-        flask_app = Flask(__name__)
+        app = Flask(__name__)
         
-        @flask_app.route('/')
+        @app.route('/')
         def home():
             return "KORECKT Bot is running!"
         
-        @flask_app.route('/health')
-        def health():
-            return "OK"
-        
         port = int(os.environ.get("PORT", 8080))
-        threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=port, debug=False), daemon=True).start()
-        print(f"🌐 Flask сервер на порту {port}")
-    except Exception as e:
-        print(f"⚠️ Flask не запущен: {e}")
+        threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
+        print(f"🌐 Flask на порту {port}")
+    except:
+        print("⚠️ Flask не установлен")
+    
+    print("=" * 40)
+    print("Бот запущен!")
     
     # Запуск бота
     while True:
