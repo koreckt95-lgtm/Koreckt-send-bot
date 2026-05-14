@@ -1,66 +1,196 @@
 import telebot
 from telethon.sync import TelegramClient
+from telethon import functions, types
 from telethon.errors import FloodWaitError
 import threading
 import time
 import random
-import json
-import os
 from datetime import datetime
+import json
+import re
+import os
 
-# ==================== ПЕРЕМЕННЫЕ ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH")
+# ==================== НАСТРОЙКИ ====================
+API_ID = 34701116
+API_HASH = 'd481bf8b670a865da717155f6af892c2'
+BOT_TOKEN = '8600586993:AAGyDp9AXOj5Qvl7Q52D68gDiuUbxLDwKLA'
+ADMIN_ID = 2097475960
 
-# Файлы
-CHATS_FILE = "chats.json"
-ADS_FILE = "ads.json"
-SESSION_FILE = "kor_session.session"  # Загруженный файл сессии
+# Файл для сохранения чатов
+CHATS_FILE = "target_chats.json"
+SESSION_FILE = "kor_session.session"  # Файл сессии
 
-# ==================== ЗАГРУЗКА ДАННЫХ ====================
 def load_chats():
     try:
-        with open(CHATS_FILE, 'r') as f:
+        with open(CHATS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     except:
-        return []
+        return [
+            "https://t.me/bestpiarchat3",
+            "https://t.me/Ukrainskiy_piar",
+            "https://t.me/PRbirza1"
+        ]
 
 def save_chats(chats):
-    with open(CHATS_FILE, 'w') as f:
-        json.dump(chats, f)
+    with open(CHATS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(chats, f, ensure_ascii=False, indent=2)
 
-def load_ads():
-    try:
-        with open(ADS_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return []
+TARGET_CHATS = load_chats()
+# =========================================================================
 
-def save_ads(ads):
-    with open(ADS_FILE, 'w') as f:
-        json.dump(ads, f)
-
-# Настройки
-config = {
-    "delay_min": 150,
-    "delay_max": 400,
-    "daily_limit": 100,
-    "active": False
+CONFIG = {
+    "mailing_enabled": False,
+    "stats": {
+        "total_sent": 0,
+        "today_sent": 0,
+        "errors": 0,
+        "last_date": datetime.now().date().isoformat()
+    },
+    "delay_between_chats": {"min": 150, "max": 400},
+    "delay_between_rounds": {"min": 300, "max": 600},
+    "typing_speed": {"min": 5, "max": 12},
+    "smart_delays": True
 }
 
-stats = {"sent": 0, "errors": 0, "today": 0, "last_date": datetime.now().date().isoformat()}
-
-# ==================== БОТ ====================
 bot = telebot.TeleBot(BOT_TOKEN)
 client = None
+mailing_thread = None
+
+# Временное хранилище для создания медиа-объявлений
 temp_media = {}
 
-def init_client():
-    """Инициализация клиента с готовой сессией"""
+# ==================== БАЗА ДАННЫХ ====================
+class SimpleDB:
+    def __init__(self, filename="koreckt_data.json"):
+        self.filename = filename
+        self.data = self.load()
+    
+    def load(self):
+        try:
+            with open(self.filename, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {
+                "ads": [],
+                "history": [],
+                "next_id": 1
+            }
+    
+    def save(self):
+        with open(self.filename, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+    
+    def add_ad(self, ad_type, text="", media_files=None):
+        ad_id = self.data["next_id"]
+        self.data["next_id"] = self.data["next_id"] + 1
+        
+        ad = {
+            "id": ad_id,
+            "type": ad_type,
+            "text": text,
+            "media_files": media_files or [],
+            "created": datetime.now().isoformat(),
+            "sent_count": 0
+        }
+        self.data["ads"].append(ad)
+        self.save()
+        return ad_id
+    
+    def get_ads(self):
+        return self.data["ads"]
+    
+    def get_ad_by_id(self, ad_id):
+        for ad in self.data["ads"]:
+            if ad["id"] == ad_id:
+                return ad
+        return None
+    
+    def delete_ad(self, ad_id):
+        self.data["ads"] = [ad for ad in self.data["ads"] if ad["id"] != ad_id]
+        self.save()
+    
+    def clear_all(self):
+        self.data["ads"] = []
+        self.save()
+    
+    def add_history(self, ad_id, chat, success):
+        self.data["history"].append({
+            "ad_id": ad_id,
+            "chat": chat,
+            "success": success,
+            "time": datetime.now().isoformat()
+        })
+        if len(self.data["history"]) > 1000:
+            self.data["history"] = self.data["history"][-1000:]
+        self.save()
+
+db = SimpleDB()
+
+def update_stats(sent=True):
+    today = datetime.now().date().isoformat()
+    if CONFIG["stats"]["last_date"] != today:
+        CONFIG["stats"]["today_sent"] = 0
+        CONFIG["stats"]["last_date"] = today
+    
+    if sent:
+        CONFIG["stats"]["total_sent"] = CONFIG["stats"]["total_sent"] + 1
+        CONFIG["stats"]["today_sent"] = CONFIG["stats"]["today_sent"] + 1
+    else:
+        CONFIG["stats"]["errors"] = CONFIG["stats"]["errors"] + 1
+
+def smart_delay(min_sec, max_sec, reason=""):
+    delay = random.uniform(min_sec, max_sec)
+    if reason:
+        print(reason + ": " + str(round(delay, 1)) + " sec")
+    
+    steps = int(delay)
+    for i in range(steps):
+        if not CONFIG["mailing_enabled"]:
+            break
+        if i % 30 == 0 and i > 0:
+            print("   Remaining: " + str(steps - i) + " sec")
+        time.sleep(1)
+
+def calculate_typing_time(text):
+    speed = random.uniform(CONFIG["typing_speed"]["min"], CONFIG["typing_speed"]["max"])
+    base_time = len(text) / speed
+    punctuation = text.count('.') * 0.25 + text.count(',') * 0.15
+    punctuation = punctuation + text.count('!') * 0.2 + text.count('?') * 0.2
+    words = text.split()
+    long_words = 0
+    for w in words:
+        if len(w) > 8:
+            long_words = long_words + 1
+    long_words_bonus = long_words * 0.3
+    human_factor = random.uniform(0.85, 1.4)
+    total = (base_time + punctuation + long_words_bonus) * human_factor
+    if total < 2:
+        return 2
+    if total > 20:
+        return 20
+    return total
+
+# ==================== ПРОВЕРКА АККАУНТА ====================
+def check_account_limits():
     global client
     try:
+        me = client.get_me()
+        print("Account check: " + me.first_name)
+        print("ID: " + str(me.id))
+        if me.restricted:
+            print("WARNING: Account has restrictions!")
+            return False
+        print("Account status: OK")
+        return True
+    except Exception as e:
+        print("Check error: " + str(e))
+        return False
+
+# ==================== ИНИЦИАЛИЗАЦИЯ КЛИЕНТА С СЕССИЕЙ ====================
+def init_client():
+    global client
+    try:
+        # Проверяем наличие файла сессии
         if os.path.exists(SESSION_FILE):
             print(f"✅ Найден файл сессии: {SESSION_FILE}")
             client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
@@ -68,402 +198,653 @@ def init_client():
             
             if client.is_user_authorized():
                 me = client.get_me()
-                print(f"✅ Авторизован: {me.first_name} (@{me.username})")
+                print(f"✅ Авторизован: {me.first_name} (@{me.username if me.username else 'нет'})")
+                check_account_limits()
                 return True
             else:
                 print("❌ Сессия не активна, нужна переавторизация")
                 return False
         else:
-            print("❌ Файл сессии не найден!")
+            print(f"❌ Файл сессии {SESSION_FILE} не найден!")
+            print("Загрузите файл kor_session.session через секретные файлы Render")
             return False
     except Exception as e:
         print(f"❌ Ошибка инициализации: {e}")
         return False
 
-# ==================== ОТПРАВКА ====================
-def send_message(chat, text, photo=None):
-    global client
+# ==================== ОТПРАВКА МЕДИА ====================
+def send_media_message(chat, ad):
     try:
-        if photo:
-            client.send_file(chat, photo, caption=text)
-        else:
-            time.sleep(random.uniform(2, 6))
-            client.send_message(chat, text)
+        if ad.get("text") and ad["text"] != "":
+            typing_time = calculate_typing_time(ad["text"])
+            client(functions.messages.SetTypingRequest(
+                peer=chat,
+                action=types.SendMessageTypingAction()
+            ))
+            time.sleep(typing_time)
+        
+        if ad["type"] == "text":
+            client.send_message(chat, ad["text"])
+        
+        elif ad["type"] == "photo":
+            if ad.get("media_files") and len(ad["media_files"]) > 0:
+                client.send_file(chat, ad["media_files"][0], caption=ad.get("text", ""))
+            else:
+                client.send_message(chat, ad.get("text", ""))
+        
+        elif ad["type"] == "video":
+            if ad.get("media_files") and len(ad["media_files"]) > 0:
+                client.send_file(chat, ad["media_files"][0], caption=ad.get("text", ""))
+            else:
+                client.send_message(chat, ad.get("text", ""))
+        
+        elif ad["type"] == "multi_photo":
+            if ad.get("media_files"):
+                for i, photo in enumerate(ad["media_files"][:10]):
+                    if i == 0:
+                        client.send_file(chat, photo, caption=ad.get("text", ""))
+                    else:
+                        client.send_file(chat, photo)
+                        time.sleep(random.uniform(0.5, 2))
+            else:
+                client.send_message(chat, ad.get("text", ""))
+        
         return True
+        
     except FloodWaitError as e:
-        print(f"Flood: {e.seconds} сек")
-        time.sleep(e.seconds)
+        print("Flood wait: " + str(e.seconds) + " sec")
+        time.sleep(e.seconds + 5)
         return False
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print("Send error: " + str(e))
         return False
 
-def mailing_loop():
-    global stats
+# ==================== ДВИЖОК РАССЫЛКИ ====================
+def pro_sender_engine():
+    global client
+    
+    print("KORECKT ENGINE STARTED")
+    print("=" * 40)
+    
+    # Ждём инициализации клиента
+    while client is None:
+        print("⏳ Ожидание инициализации клиента...")
+        time.sleep(5)
+    
+    print("=" * 40)
+    
     while True:
-        if not config["active"] or not client:
-            time.sleep(2)
+        if not CONFIG["mailing_enabled"]:
+            time.sleep(3)
             continue
         
-        ads = load_ads()
-        chats = load_chats()
+        # Проверяем соединение
+        if not client or not client.is_connected():
+            print("⚠️ Клиент не подключен, переподключаемся...")
+            try:
+                client.connect()
+                if not client.is_user_authorized():
+                    print("❌ Не авторизован, жду...")
+                    time.sleep(10)
+                    continue
+            except Exception as e:
+                print(f"❌ Ошибка подключения: {e}")
+                time.sleep(10)
+                continue
         
-        if not ads or not chats:
+        ads = db.get_ads()
+        if not ads:
+            print("No ads, waiting...")
             time.sleep(30)
             continue
         
-        # Дневной лимит
-        today = datetime.now().date().isoformat()
-        if stats["last_date"] != today:
-            stats["today"] = 0
-            stats["last_date"] = today
-        
-        if stats["today"] >= config["daily_limit"]:
-            config["active"] = False
-            continue
-        
         ad = random.choice(ads)
-        print(f"Рассылка: {ad.get('text', '')[:50]}...")
         
-        for chat in chats:
-            if not config["active"]:
+        type_names = {"text": "Text", "photo": "Photo", "video": "Video", "multi_photo": "Multi photo"}
+        print("\nNEW ROUND STARTED")
+        print("Type: " + type_names.get(ad["type"], ad["type"]) + ", ID: " + str(ad["id"]))
+        if ad.get("text"):
+            print("Text: " + ad["text"][:50])
+        
+        for idx, chat in enumerate(TARGET_CHATS):
+            if not CONFIG["mailing_enabled"]:
                 break
             
-            success = send_message(chat, ad.get("text", ""), ad.get("photo"))
+            print("\nProcessing chat: " + chat)
+            smart_delay(3, 8, "Entering chat")
+            
+            success = send_media_message(chat, ad)
             
             if success:
-                stats["sent"] += 1
-                stats["today"] += 1
-                print(f"✅ {chat}")
+                print("SUCCESS sent to " + chat)
+                update_stats(True)
+                db.add_history(ad["id"], chat, True)
             else:
-                stats["errors"] += 1
-                print(f"❌ {chat}")
-                time.sleep(60)
+                print("FAIL to " + chat)
+                update_stats(False)
+                db.add_history(ad["id"], chat, False)
+                smart_delay(30, 60, "Pause after error")
             
-            time.sleep(random.uniform(config["delay_min"], config["delay_max"]))
+            if idx < len(TARGET_CHATS) - 1:
+                smart_delay(CONFIG["delay_between_chats"]["min"], CONFIG["delay_between_chats"]["max"], "Pause between chats")
         
-        print("Круг завершён, пауза...")
-        time.sleep(random.uniform(300, 600))
+        if CONFIG["mailing_enabled"] and ads:
+            print("\nROUND COMPLETED")
+            wait_min = CONFIG["delay_between_rounds"]["min"]
+            wait_max = CONFIG["delay_between_rounds"]["max"]
+            smart_delay(wait_min, wait_max, "Pause between rounds")
+            
+            if CONFIG["stats"]["errors"] > 0:
+                CONFIG["stats"]["errors"] = max(0, CONFIG["stats"]["errors"] - 1)
 
-# ==================== КОМАНДЫ БОТА ====================
-@bot.message_handler(commands=['start'])
-def start_cmd(msg):
+# ==================== КОМАНДЫ ДЛЯ ЧАТОВ ====================
+@bot.message_handler(commands=['addchat'])
+def add_chat(msg):
     if msg.from_user.id != ADMIN_ID:
         return
     
-    is_auth = client and client.is_connected() if client else False
-    auth_status = "✅" if is_auth else "❌"
+    parts = msg.text.replace('/addchat', '').strip().split()
+    if not parts:
+        bot.reply_to(msg, "Usage: /addchat https://t.me/chatname")
+        return
     
-    text = f"""
-🤖 **KORECKT БОТ**
+    chat_url = parts[0]
+    if not chat_url.startswith("https://t.me/") and not chat_url.startswith("@"):
+        chat_url = "https://t.me/" + chat_url.replace("@", "")
+    
+    if chat_url not in TARGET_CHATS:
+        TARGET_CHATS.append(chat_url)
+        save_chats(TARGET_CHATS)
+        bot.reply_to(msg, "Chat added!\nTotal chats: " + str(len(TARGET_CHATS)) + "\n" + chat_url)
+    else:
+        bot.reply_to(msg, "Chat already in list")
 
-🔐 Статус: {auth_status}
-📝 Объявлений: {len(load_ads())}
-🎯 Чатов: {len(load_chats())}
-📊 Сегодня: {stats['today']}/{config['daily_limit']}
-🚀 Рассылка: {'✅' if config['active'] else '❌'}
-
-━━━━━━━━━━━━━━━━━
-
-📝 **ОБЪЯВЛЕНИЯ:**
-/add_text Текст - текст
-/add_photo - фото+текст
-/list - список
-/del [ID] - удалить
-
-🎯 **ЧАТЫ:**
-/addchat [ссылка] - добавить
-/removechat [ID] - удалить
-/listchats - список
-
-🚀 **УПРАВЛЕНИЕ:**
-/startmail - запуск
-/stopmail - остановка
-/setdelay 150 400 - пауза
-/setdaily 100 - лимит
-
-📊 **СТАТИСТИКА:**
-/stats - показать
-"""
-    bot.reply_to(msg, text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['add_text'])
-def add_text(msg):
+@bot.message_handler(commands=['removechat'])
+def remove_chat(msg):
     if msg.from_user.id != ADMIN_ID:
         return
-    text = msg.text.replace('/add_text', '').strip()
-    if not text:
-        bot.reply_to(msg, "❌ /add_text Текст")
+    
+    parts = msg.text.replace('/removechat', '').strip().split()
+    if not parts:
+        bot.reply_to(msg, "Usage: /removechat 1  OR  /removechat https://t.me/chatname")
         return
     
-    ads = load_ads()
-    ad_id = len(ads) + 1
-    ads.append({"id": ad_id, "type": "text", "text": text, "photo": None})
-    save_ads(ads)
-    bot.reply_to(msg, f"✅ Объявление #{ad_id}")
+    if parts[0].isdigit():
+        idx = int(parts[0]) - 1
+        if 0 <= idx < len(TARGET_CHATS):
+            removed = TARGET_CHATS.pop(idx)
+            save_chats(TARGET_CHATS)
+            bot.reply_to(msg, "Chat removed!\n" + removed + "\nRemaining: " + str(len(TARGET_CHATS)))
+        else:
+            bot.reply_to(msg, "Invalid number. Total chats: " + str(len(TARGET_CHATS)))
+    else:
+        chat_url = parts[0]
+        if chat_url in TARGET_CHATS:
+            TARGET_CHATS.remove(chat_url)
+            save_chats(TARGET_CHATS)
+            bot.reply_to(msg, "Chat removed!\n" + chat_url + "\nRemaining: " + str(len(TARGET_CHATS)))
+        else:
+            bot.reply_to(msg, "Chat not found")
 
+@bot.message_handler(commands=['listchats'])
+def list_chats(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    if not TARGET_CHATS:
+        bot.reply_to(msg, "No chats. Add with /addchat")
+        return
+    
+    response = "CHATS LIST:\n\n"
+    for i, chat in enumerate(TARGET_CHATS, 1):
+        short = chat.replace("https://t.me/", "@")
+        response = response + str(i) + ". " + short + "\n"
+    
+    response = response + "\nTotal: " + str(len(TARGET_CHATS)) + " chats"
+    bot.reply_to(msg, response)
+
+# ==================== КОМАНДЫ ДЛЯ МЕДИА-ОБЪЯВЛЕНИЙ ====================
 @bot.message_handler(commands=['add_photo'])
 def add_photo(msg):
     if msg.from_user.id != ADMIN_ID:
         return
-    temp_media[msg.chat.id] = {"step": "photo"}
-    bot.reply_to(msg, "📸 Отправьте ФОТО, затем ТЕКСТ (или /skip)")
+    temp_media[msg.chat.id] = {"type": "photo", "step": "photo", "media_files": []}
+    bot.reply_to(msg, "Send PHOTO, then send text (or /skip)")
+
+@bot.message_handler(commands=['add_video'])
+def add_video(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    temp_media[msg.chat.id] = {"type": "video", "step": "video", "media_files": []}
+    bot.reply_to(msg, "Send VIDEO, then send text (or /skip)")
+
+@bot.message_handler(commands=['add_multi'])
+def add_multi(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    temp_media[msg.chat.id] = {"type": "multi_photo", "step": "multi_photo", "media_files": []}
+    bot.reply_to(msg, "Send UP TO 10 PHOTOS (one by one), then /done\n/skip - skip text")
+
+@bot.message_handler(commands=['done'])
+def done_multi(msg):
+    if msg.chat.id not in temp_media:
+        return
+    if temp_media[msg.chat.id].get("step") == "multi_photo":
+        temp_media[msg.chat.id]["step"] = "text"
+        bot.reply_to(msg, "Enter text for all photos (or /skip)")
 
 @bot.message_handler(commands=['skip'])
 def skip_text(msg):
     if msg.chat.id not in temp_media:
         return
-    if "photo" in temp_media[msg.chat.id]:
-        data = temp_media[msg.chat.id]
-        ads = load_ads()
-        ad_id = len(ads) + 1
-        ads.append({"id": ad_id, "type": "photo", "text": "", "photo": data["photo"]})
-        save_ads(ads)
-        bot.reply_to(msg, f"✅ Объявление #{ad_id}")
+    data = temp_media[msg.chat.id]
+    ad_id = db.add_ad(data["type"], "", data.get("media_files", []))
+    bot.reply_to(msg, "Ad #" + str(ad_id) + " created! Type: " + data["type"])
     del temp_media[msg.chat.id]
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(msg):
     if msg.chat.id not in temp_media:
         return
-    photo = msg.photo[-1].file_id
-    temp_media[msg.chat.id] = {"step": "text", "photo": photo}
-    bot.reply_to(msg, "📝 Отправьте ТЕКСТ (или /skip)")
+    data = temp_media[msg.chat.id]
+    
+    if data["type"] == "photo" and data.get("step") == "photo":
+        file_id = msg.photo[-1].file_id
+        data["media_files"] = [file_id]
+        data["step"] = "text"
+        bot.reply_to(msg, "Enter text for photo (or /skip)")
+    
+    elif data["type"] == "multi_photo" and data.get("step") == "multi_photo":
+        file_id = msg.photo[-1].file_id
+        data["media_files"].append(file_id)
+        count = len(data["media_files"])
+        if count >= 10:
+            bot.reply_to(msg, "Got " + str(count) + "/10 photos! Type /done")
+        else:
+            bot.reply_to(msg, "Photo " + str(count) + "/10 received. Send more or /done")
+
+@bot.message_handler(content_types=['video'])
+def handle_video(msg):
+    if msg.chat.id not in temp_media:
+        return
+    data = temp_media[msg.chat.id]
+    
+    if data["type"] == "video" and data.get("step") == "video":
+        file_id = msg.video.file_id
+        data["media_files"] = [file_id]
+        data["step"] = "text"
+        bot.reply_to(msg, "Enter text for video (or /skip)")
 
 @bot.message_handler(func=lambda m: m.chat.id in temp_media and temp_media[m.chat.id].get("step") == "text")
-def handle_text(msg):
+def handle_media_text(msg):
     data = temp_media[msg.chat.id]
-    ads = load_ads()
-    ad_id = len(ads) + 1
-    ads.append({"id": ad_id, "type": "photo", "text": msg.text, "photo": data["photo"]})
-    save_ads(ads)
+    ad_id = db.add_ad(data["type"], msg.text, data.get("media_files", []))
+    
+    type_names = {"photo": "Photo", "video": "Video", "multi_photo": "Multi photo"}
+    bot.reply_to(msg, "Ad #" + str(ad_id) + " created!\nType: " + type_names.get(data["type"], data["type"]) + "\nText: " + msg.text[:100])
     del temp_media[msg.chat.id]
-    bot.reply_to(msg, f"✅ Объявление #{ad_id} (фото+текст)")
+
+# ==================== ПРОВЕРКА АККАУНТА ====================
+@bot.message_handler(commands=['check'])
+def check_account(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    if not client or not client.is_connected():
+        bot.reply_to(msg, "❌ Not authorized. Загрузите файл kor_session.session")
+        return
+    
+    try:
+        me = client.get_me()
+        info = "✅ ACCOUNT INFO:\n"
+        info = info + "Name: " + me.first_name + "\n"
+        info = info + "ID: " + str(me.id) + "\n"
+        if me.username:
+            info = info + "Username: @" + me.username + "\n"
+        info = info + "Premium: " + ("Yes" if me.premium else "No") + "\n"
+        
+        if me.restricted:
+            info = info + "Status: RESTRICTED!\n"
+        else:
+            info = info + "Status: OK\n"
+        
+        bot.reply_to(msg, info)
+    except Exception as e:
+        bot.reply_to(msg, "Check error: " + str(e))
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+@bot.message_handler(commands=['start'])
+def start_cmd(msg):
+    if msg.from_user.id != ADMIN_ID:
+        bot.reply_to(msg, "Access denied")
+        return
+    
+    # Проверяем статус авторизации
+    auth_status = "❌"
+    if client and client.is_connected():
+        try:
+            if client.is_user_authorized():
+                auth_status = "✅"
+        except:
+            pass
+    
+    status = "ACTIVE" if CONFIG["mailing_enabled"] else "STOPPED"
+    ads_count = len(db.get_ads())
+    chats_count = len(TARGET_CHATS)
+    sent_today = CONFIG["stats"]["today_sent"]
+    total_sent = CONFIG["stats"]["total_sent"]
+    errors = CONFIG["stats"]["errors"]
+    
+    info = f"""🤖 KORECKT V3.0 MAILING BOT
+
+🔐 Auth: {auth_status}
+📁 Session file: {'✅' if os.path.exists(SESSION_FILE) else '❌'}
+
+━━━━━━━━━━━━━━━━━━━
+
+📝 **ADS:**
+/add [text] - Text ad
+/add_photo - Photo + text
+/add_video - Video + text
+/add_multi - Up to 10 photos
+/list - List ads
+/del [id] - Delete ad
+/clear - Clear all ads
+
+🎯 **CHATS:**
+/addchat [link] - Add chat
+/removechat [number] - Remove chat
+/listchats - List chats
+
+🚀 **MAILING:**
+/startmail - Start mailing
+/stopmail - Stop mailing
+
+📊 **STATS:**
+/stats - Statistics
+/check - Check account
+/config - Settings
+/setdelay [min] [max] - Delay between chats
+/setround [min] [max] - Delay between rounds
+
+━━━━━━━━━━━━━━━━━━━
+Mailing: {status}
+Ads: {ads_count}
+Chats: {chats_count}
+Sent today: {sent_today}
+Total sent: {total_sent}
+Errors: {errors}"""
+    
+    bot.reply_to(msg, info)
+
+@bot.message_handler(commands=['add'])
+def add_text_ad(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    text = msg.text.replace('/add', '').strip()
+    if not text:
+        bot.reply_to(msg, "Usage: /add Your ad text")
+        return
+    
+    ad_id = db.add_ad("text", text, [])
+    bot.reply_to(msg, "Ad #" + str(ad_id) + " added!\nText: " + text[:100])
 
 @bot.message_handler(commands=['list'])
 def list_ads(msg):
     if msg.from_user.id != ADMIN_ID:
         return
-    ads = load_ads()
+    
+    ads = db.get_ads()
     if not ads:
-        bot.reply_to(msg, "📭 Нет")
+        bot.reply_to(msg, "No ads")
         return
     
-    text = "📝 **Объявления:**\n\n"
+    response = "📝 ADS LIST:\n\n"
     for ad in ads[-10:]:
-        preview = ad.get('text', 'Без текста')[:40]
-        text += f"`ID {ad['id']}` [{ad['type']}]: {preview}\n"
-    bot.reply_to(msg, text, parse_mode="Markdown")
+        preview = ad['text'][:60]
+        if len(ad['text']) > 60:
+            preview = preview + "..."
+        response = response + "ID " + str(ad['id']) + " [" + ad['type'] + "]: " + preview + "\n\n"
+    
+    if len(ads) > 10:
+        response = response + "...and " + str(len(ads)-10) + " more"
+    
+    bot.reply_to(msg, response)
 
 @bot.message_handler(commands=['del'])
-def del_ad(msg):
+def delete_ad(msg):
     if msg.from_user.id != ADMIN_ID:
         return
+    
     try:
-        ad_id = int(msg.text.replace('/del', '').strip())
-        ads = load_ads()
-        ads = [a for a in ads if a["id"] != ad_id]
-        save_ads(ads)
-        bot.reply_to(msg, f"✅ #{ad_id} удалено")
-    except:
-        bot.reply_to(msg, "❌ /del 1")
-
-@bot.message_handler(commands=['addchat'])
-def add_chat(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    parts = msg.text.replace('/addchat', '').strip().split()
-    if not parts:
-        bot.reply_to(msg, "❌ /addchat https://t.me/chat")
-        return
-    
-    chat = parts[0]
-    if not chat.startswith("https://t.me/"):
-        chat = "https://t.me/" + chat.replace("@", "")
-    
-    chats = load_chats()
-    if chat not in chats:
-        chats.append(chat)
-        save_chats(chats)
-        bot.reply_to(msg, f"✅ {chat}")
-    else:
-        bot.reply_to(msg, "⚠️ Уже есть")
-
-@bot.message_handler(commands=['removechat'])
-def remove_chat(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    parts = msg.text.replace('/removechat', '').strip().split()
-    if not parts:
-        bot.reply_to(msg, "❌ /removechat 1")
-        return
-    
-    chats = load_chats()
-    if parts[0].isdigit():
-        idx = int(parts[0]) - 1
-        if 0 <= idx < len(chats):
-            removed = chats.pop(idx)
-            save_chats(chats)
-            bot.reply_to(msg, f"✅ {removed}")
+        parts = msg.text.replace('/del', '').strip().split()
+        ad_id = int(parts[0])
+        ad = db.get_ad_by_id(ad_id)
+        if ad:
+            db.delete_ad(ad_id)
+            bot.reply_to(msg, "Ad #" + str(ad_id) + " deleted")
         else:
-            bot.reply_to(msg, "❌ Неверный номер")
-    else:
-        chat = parts[0]
-        if chat in chats:
-            chats.remove(chat)
-            save_chats(chats)
-            bot.reply_to(msg, f"✅ {chat}")
+            bot.reply_to(msg, "Ad #" + str(ad_id) + " not found")
+    except:
+        bot.reply_to(msg, "Usage: /del 1")
 
-@bot.message_handler(commands=['listchats'])
-def list_chats(msg):
+@bot.message_handler(commands=['clear'])
+def clear_ads(msg):
     if msg.from_user.id != ADMIN_ID:
-        return
-    chats = load_chats()
-    if not chats:
-        bot.reply_to(msg, "📭 Нет")
         return
     
-    text = "🎯 **Чаты:**\n\n"
-    for i, chat in enumerate(chats[:30], 1):
-        short = chat.replace("https://t.me/", "@")
-        text += f"{i}. {short}\n"
-    if len(chats) > 30:
-        text += f"\n...и ещё {len(chats)-30}"
-    bot.reply_to(msg, text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['startmail'])
-def start_mail(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    if not client:
-        bot.reply_to(msg, "❌ Нет сессии. Загрузите файл kor_session.session")
-        return
-    if len(load_ads()) == 0:
-        bot.reply_to(msg, "❌ Нет объявлений")
-        return
-    if len(load_chats()) == 0:
-        bot.reply_to(msg, "❌ Нет чатов")
-        return
-    
-    config["active"] = True
-    bot.reply_to(msg, "🚀 **Рассылка запущена!**")
-
-@bot.message_handler(commands=['stopmail'])
-def stop_mail(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    config["active"] = False
-    bot.reply_to(msg, "🛑 **Остановлено**")
-
-@bot.message_handler(commands=['setdelay'])
-def set_delay(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    try:
-        parts = msg.text.replace('/setdelay', '').strip().split()
-        config["delay_min"] = int(parts[0])
-        config["delay_max"] = int(parts[1])
-        bot.reply_to(msg, f"✅ {config['delay_min']}-{config['delay_max']} сек")
-    except:
-        bot.reply_to(msg, "❌ /setdelay 150 400")
-
-@bot.message_handler(commands=['setdaily'])
-def set_daily(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    try:
-        limit = int(msg.text.replace('/setdaily', '').strip())
-        config["daily_limit"] = limit
-        bot.reply_to(msg, f"✅ Дневной лимит: {limit}")
-    except:
-        bot.reply_to(msg, "❌ /setdaily 100")
+    db.clear_all()
+    bot.reply_to(msg, "All ads cleared")
 
 @bot.message_handler(commands=['stats'])
 def show_stats(msg):
     if msg.from_user.id != ADMIN_ID:
         return
     
-    success_rate = 0
-    total = stats["sent"] + stats["errors"]
-    if total > 0:
-        success_rate = stats["sent"] / total * 100
+    ads = db.get_ads()
+    history = db.data["history"]
     
-    text = f"""
-📊 **СТАТИСТИКА**
+    text_count = 0
+    photo_count = 0
+    video_count = 0
+    multi_count = 0
+    
+    for ad in ads:
+        if ad["type"] == "text":
+            text_count = text_count + 1
+        elif ad["type"] == "photo":
+            photo_count = photo_count + 1
+        elif ad["type"] == "video":
+            video_count = video_count + 1
+        elif ad["type"] == "multi_photo":
+            multi_count = multi_count + 1
+    
+    success_count = 0
+    for h in history:
+        if h["success"]:
+            success_count = success_count + 1
+    
+    success_rate = 0
+    if history:
+        success_rate = success_count / len(history) * 100
+    
+    response = """📊 STATISTICS
 
-📨 Отправлено: {stats['sent']}
-❌ Ошибок: {stats['errors']}
-📈 Успешность: {success_rate:.1f}%
+=== ADS ===
+Total: """ + str(len(ads)) + """
+Text: """ + str(text_count) + """
+Photo: """ + str(photo_count) + """
+Video: """ + str(video_count) + """
+Multi photo: """ + str(multi_count) + """
 
-📅 Сегодня: {stats['today']}/{config['daily_limit']}
-🎯 Чатов: {len(load_chats())}
-📝 Объявлений: {len(load_ads())}
+=== SENDS ===
+Successful: """ + str(success_count) + """
+Failed: """ + str(len(history) - success_count) + """
+Success rate: """ + str(round(success_rate, 1)) + """%
 
-🚀 Рассылка: {'✅' if config['active'] else '❌'}
-"""
-    bot.reply_to(msg, text, parse_mode="Markdown")
+=== TODAY ===
+Sent: """ + str(CONFIG["stats"]["today_sent"]) + """
+Errors: """ + str(CONFIG["stats"]["errors"]) + """
 
-@bot.message_handler(commands=['check'])
-def check_account(msg):
+=== TOTAL ===
+Sent: """ + str(CONFIG["stats"]["total_sent"]) + """
+
+=== CHATS ===
+Total: """ + str(len(TARGET_CHATS))
+    
+    if history:
+        response = response + "\n\nLAST 5 SENDS:\n"
+        last_5 = history[-5:][::-1]
+        for h in last_5:
+            status = "✅" if h["success"] else "❌"
+            time_str = h["time"][:19].replace("T", " ")
+            response = response + status + " " + time_str + " → " + h["chat"] + "\n"
+    
+    bot.reply_to(msg, response)
+
+@bot.message_handler(commands=['chats'])
+def show_chats(msg):
     if msg.from_user.id != ADMIN_ID:
         return
-    if not client:
-        bot.reply_to(msg, "❌ Нет сессии")
+    
+    response = "🎯 TARGET CHATS:\n\n"
+    for i, chat in enumerate(TARGET_CHATS, 1):
+        short = chat.replace("https://t.me/", "@")
+        response = response + str(i) + ". " + short + "\n"
+    
+    response = response + "\nTotal: " + str(len(TARGET_CHATS)) + " chats"
+    response = response + "\n\nUse /addchat, /removechat, /listchats"
+    bot.reply_to(msg, response)
+
+@bot.message_handler(commands=['startmail'])
+def start_mailing(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    if not client or not client.is_connected():
+        bot.reply_to(msg, "❌ Cannot start: no session!\nЗагрузите файл kor_session.session")
+        return
+    
+    if len(db.get_ads()) == 0:
+        bot.reply_to(msg, "Cannot start: no ads!\nAdd ads with /add, /add_photo, /add_video, /add_multi")
+        return
+    
+    if not CONFIG["mailing_enabled"]:
+        CONFIG["mailing_enabled"] = True
+        bot.reply_to(msg, "🚀 MAILING STARTED!\n\nAds: " + str(len(db.get_ads())) + "\nChats: " + str(len(TARGET_CHATS)))
+        print("Mailing started by admin")
+    else:
+        bot.reply_to(msg, "Mailing already active")
+
+@bot.message_handler(commands=['stopmail'])
+def stop_mailing(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    if CONFIG["mailing_enabled"]:
+        CONFIG["mailing_enabled"] = False
+        bot.reply_to(msg, "🛑 MAILING STOPPED")
+        print("Mailing stopped by admin")
+    else:
+        bot.reply_to(msg, "Mailing already stopped")
+
+@bot.message_handler(commands=['config'])
+def show_config(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    response = """⚙️ CONFIGURATION
+
+Delay between chats: """ + str(CONFIG["delay_between_chats"]["min"]) + "-" + str(CONFIG["delay_between_chats"]["max"]) + """ sec
+Delay between rounds: """ + str(CONFIG["delay_between_rounds"]["min"]) + "-" + str(CONFIG["delay_between_rounds"]["max"]) + """ sec
+Typing speed: """ + str(CONFIG["typing_speed"]["min"]) + "-" + str(CONFIG["typing_speed"]["max"]) + """ chars/sec
+Smart delays: """ + ("ON" if CONFIG["smart_delays"] else "OFF") + """
+
+Mailing: """ + ("ACTIVE" if CONFIG["mailing_enabled"] else "STOPPED") + """
+Chats: """ + str(len(TARGET_CHATS)) + """
+Ads: """ + str(len(db.get_ads()))
+    
+    bot.reply_to(msg, response)
+
+@bot.message_handler(commands=['setdelay'])
+def set_delay(msg):
+    if msg.from_user.id != ADMIN_ID:
         return
     
     try:
-        me = client.get_me()
-        text = f"""
-✅ **Аккаунт**
+        parts = msg.text.replace('/setdelay', '').strip().split()
+        min_d = int(parts[0])
+        max_d = int(parts[1])
+        CONFIG["delay_between_chats"]["min"] = min_d
+        CONFIG["delay_between_chats"]["max"] = max_d
+        bot.reply_to(msg, "Delay between chats: " + str(min_d) + "-" + str(max_d) + " sec")
+    except:
+        bot.reply_to(msg, "Usage: /setdelay 150 400")
 
-👤 {me.first_name}
-🆔 {me.id}
-📱 Premium: {'Да' if me.premium else 'Нет'}
+@bot.message_handler(commands=['setround'])
+def set_round(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = msg.text.replace('/setround', '').strip().split()
+        min_d = int(parts[0])
+        max_d = int(parts[1])
+        CONFIG["delay_between_rounds"]["min"] = min_d
+        CONFIG["delay_between_rounds"]["max"] = max_d
+        bot.reply_to(msg, "Delay between rounds: " + str(min_d) + "-" + str(max_d) + " sec")
+    except:
+        bot.reply_to(msg, "Usage: /setround 300 600")
 
-⚠️ Бан: Нет
-"""
-        bot.reply_to(msg, text, parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(msg, f"❌ {e}")
-
-# ==================== ЗАПУСК ====================
-if __name__ == "__main__":
-    print("🤖 KORECKT БОТ")
-    print("=" * 40)
-    
-    # Загружаем сессию
-    if init_client():
-        print("✅ Готов к работе!")
-    else:
-        print("⚠️ Сессия не загружена, рассылка не будет работать")
-    
-    # Запуск рассылки
-    thread = threading.Thread(target=mailing_loop, daemon=True)
-    thread.start()
-    
-    # Flask для Render
+# ==================== FLASK ДЛЯ RENDER ====================
+def start_flask():
     try:
         from flask import Flask
         app = Flask(__name__)
         
         @app.route('/')
         def home():
-            return "KORECKT Bot is running!"
+            return "🤖 KORECKT BOT is running!"
+        
+        @app.route('/health')
+        def health():
+            return "OK"
         
         port = int(os.environ.get("PORT", 8080))
-        threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
-        print(f"🌐 Flask на порту {port}")
-    except:
-        print("⚠️ Flask не установлен")
+        app.run(host="0.0.0.0", port=port, debug=False)
+    except Exception as e:
+        print(f"Flask error: {e}")
+
+# ==================== ЗАПУСК ====================
+if __name__ == "__main__":
+    print("=" * 50)
+    print("KORECKT V3.0 FOR RENDER")
+    print("=" * 50)
     
-    print("=" * 40)
-    print("Бот запущен!")
+    # Инициализируем клиент с сессией
+    init_client()
     
-    # Запуск бота
+    # Запускаем движок рассылки
+    mailing_thread = threading.Thread(target=pro_sender_engine, daemon=True)
+    mailing_thread.start()
+    
+    # Запускаем Flask для Render
+    flask_thread = threading.Thread(target=start_flask, daemon=True)
+    flask_thread.start()
+    
+    print("Bot started and ready!")
+    print("Admin ID: " + str(ADMIN_ID))
+    print("Open Telegram and send /start")
+    print("=" * 50)
+    print("📁 Session file: " + ("✅" if os.path.exists(SESSION_FILE) else "❌"))
+    print("=" * 50)
+    
+    # Запускаем бота
     while True:
         try:
             bot.remove_webhook()
             bot.infinity_polling(timeout=60)
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print("Error: " + str(e))
             time.sleep(5)
